@@ -1,0 +1,1 @@
+https://argos-binary-retrieval-probe.vercel.app/test.bin
