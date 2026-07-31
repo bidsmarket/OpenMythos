@@ -1,0 +1,88 @@
+name: Temporary ARGOS Mobile 3.2.3 direct artifact build
+
+on:
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.head_ref == 'argos-apk-build-20260731'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download exact preserved source and apply isolated patch
+        run: |
+          set -euo pipefail
+          mkdir argos-src
+          curl --fail --location --retry 5 --retry-all-errors \
+            "https://uc03c5005a111b662d0875a3d5c6.dl.dropboxusercontent.com/cd/0/get/DFRhUpTJhHzbA9_xLxiOnN01g0lSaGvoJB0g58guStFzMoF6BpTJqm91-i644eB4zE_c-AWCJfIDXvDnfq2DoG3RXcPa_JgJWboXejYMRrD9Sb9I6dGxFWLIFSn3fq5EtZRuxTEXb8b-o7dczliJU-DdZrbthizuE-GgVfuECAbxmw/file?c_luid=12003740" \
+            -o /tmp/argos.zip
+          test "$(stat -c%s /tmp/argos.zip)" -eq 180620
+          test "$(sha256sum /tmp/argos.zip | cut -d' ' -f1)" = "b7c9e2e47c541b279e14abe7b016eac692760cf40d593b97e6d590f203d1f668"
+          unzip -t /tmp/argos.zip
+          unzip -q /tmp/argos.zip -d argos-src
+          cp argos-build/patch_argos.py argos-src/
+          cd argos-src
+          python3 patch_argos.py
+          grep -q 'applicationId = "com.argos.mobile.multilingual"' app/build.gradle.kts
+          grep -q 'versionCode = 30203' app/build.gradle.kts
+          grep -q 'panel.addView(telemetryPanel)' app/src/main/java/com/argos/mobile/MainActivity.kt
+          ! grep -q 'previewColumn.addView(telemetryPanel)' app/src/main/java/com/argos/mobile/MainActivity.kt
+          ! grep -RIn 'android.permission.INTERNET' app/src/main/AndroidManifest.xml
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK 36
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+      - name: Test, lint and assemble release
+        working-directory: argos-src
+        run: |
+          set -euo pipefail
+          mkdir deliverables
+          gradle --no-daemon --stacktrace :app:testDebugUnitTest 2>&1 | tee deliverables/unit-test.log
+          gradle --no-daemon --stacktrace :app:lintRelease 2>&1 | tee deliverables/lint-release.log
+          gradle --no-daemon --stacktrace :app:assembleRelease 2>&1 | tee deliverables/assemble-release.log
+          test -s app/build/outputs/apk/release/app-release-unsigned.apk
+      - name: Align, sign, inspect and checksum APK
+        working-directory: argos-src
+        run: |
+          set -euo pipefail
+          TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          FINAL="deliverables/ARGOS-Mobile-3.2.3-Telemetry-Scrollable-Final.apk"
+          "$TOOLS/zipalign" -p -f 4 app/build/outputs/apk/release/app-release-unsigned.apk /tmp/argos-aligned.apk
+          keytool -genkeypair -noprompt -storetype PKCS12 -keystore /tmp/argos.p12 \
+            -storepass argos3232026 -keypass argos3232026 -alias argosmobile \
+            -keyalg RSA -keysize 4096 -validity 3650 \
+            -dname "CN=ARGOS Mobile 3.2.3,OU=Engineering,O=ARGOS,L=Montreal,ST=Quebec,C=CA"
+          "$TOOLS/apksigner" sign --ks /tmp/argos.p12 --ks-key-alias argosmobile \
+            --ks-pass pass:argos3232026 --key-pass pass:argos3232026 \
+            --out "$FINAL" /tmp/argos-aligned.apk
+          "$TOOLS/zipalign" -c -v 4 "$FINAL" | tee deliverables/zipalign.log
+          "$TOOLS/apksigner" verify --verbose --print-certs "$FINAL" | tee deliverables/signature.log
+          "$TOOLS/aapt" dump badging "$FINAL" | tee deliverables/badging.log
+          "$TOOLS/aapt" dump permissions "$FINAL" | tee deliverables/permissions.log
+          grep -q "package: name='com.argos.mobile.multilingual' versionCode='30203' versionName='3.2.3-telemetry-scroll'" deliverables/badging.log
+          grep -q "launchable-activity: name='com.argos.mobile.MainActivity'" deliverables/badging.log
+          ! grep -q 'android.permission.INTERNET' deliverables/permissions.log
+          unzip -t "$FINAL" | tee deliverables/zip-integrity.log
+          sha256sum "$FINAL" | tee deliverables/APK-SHA256.txt
+          cp app/src/main/java/com/argos/mobile/MainActivity.kt deliverables/MainActivity-patched.kt
+          cp app/build.gradle.kts deliverables/app-build.gradle.kts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ARGOS-Mobile-3.2.3-verified-apk
+          path: argos-src/deliverables/
+          if-no-files-found: error
+          retention-days: 30
