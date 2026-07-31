@@ -3,6 +3,8 @@ from pathlib import Path
 main_path = Path("app/src/main/java/com/argos/mobile/MainActivity.kt")
 gradle_path = Path("app/build.gradle.kts")
 strings_path = Path("app/src/main/res/values/strings.xml")
+capability_path = Path("app/src/main/java/com/argos/mobile/CapabilityInspector.kt")
+localization_path = Path("app/src/main/java/com/argos/mobile/Localization.kt")
 
 main = main_path.read_text(encoding="utf-8")
 replacements = [
@@ -53,6 +55,42 @@ if main.count("panel.addView(telemetryPanel)") != 1:
     raise SystemExit("Telemetry panel must have exactly one scroll-panel parent")
 main_path.write_text(main, encoding="utf-8")
 
+capability = capability_path.read_text(encoding="utf-8")
+old_capability_header = "class CapabilityInspector(context: Context) {"
+new_capability_header = "class CapabilityInspector(private val context: Context) {"
+if capability.count(old_capability_header) != 1:
+    raise SystemExit("CapabilityInspector constructor token not found exactly once")
+capability = capability.replace(old_capability_header, new_capability_header, 1)
+if capability.count("private val context: Context") != 1:
+    raise SystemExit("CapabilityInspector Context property repair was not applied exactly once")
+capability_path.write_text(capability, encoding="utf-8")
+
+localization = localization_path.read_text(encoding="utf-8")
+old_hmc_localizer = '''fun Context.localizedHmcReason(reason: String): String = getString(
+    when (reason) {
+        "No gyroscope samples" -> R.string.hmc_reason_no_samples
+        "Insufficient or irregular IMU sampling" -> R.string.hmc_reason_irregular_sampling
+        "Predicted exposure/row-time blur exceeds target budget" -> R.string.hmc_reason_blur_exceeds
+        "Abrupt hand motion exceeds acceleration gate" -> R.string.hmc_reason_abrupt_motion
+        "Motion within capture envelope" -> R.string.hmc_reason_stable
+        else -> return reason
+    }
+)'''
+new_hmc_localizer = '''fun Context.localizedHmcReason(reason: String): String = when (reason) {
+    "No gyroscope samples" -> getString(R.string.hmc_reason_no_samples)
+    "Insufficient or irregular IMU sampling" -> getString(R.string.hmc_reason_irregular_sampling)
+    "Predicted exposure/row-time blur exceeds target budget" -> getString(R.string.hmc_reason_blur_exceeds)
+    "Abrupt hand motion exceeds acceleration gate" -> getString(R.string.hmc_reason_abrupt_motion)
+    "Motion within capture envelope" -> getString(R.string.hmc_reason_stable)
+    else -> reason
+}'''
+if localization.count(old_hmc_localizer) != 1:
+    raise SystemExit("localizedHmcReason expression-body defect not found exactly once")
+localization = localization.replace(old_hmc_localizer, new_hmc_localizer, 1)
+if "else -> return reason" in localization:
+    raise SystemExit("Invalid expression-body return remains in Localization.kt")
+localization_path.write_text(localization, encoding="utf-8")
+
 gradle = gradle_path.read_text(encoding="utf-8")
 for old, new in {
     'versionCode = 30200': 'versionCode = 30203',
@@ -71,4 +109,7 @@ if strings_path.exists():
     )
     strings_path.write_text(strings, encoding="utf-8")
 
-print("ARGOS 3.2.3 patch applied: telemetry moved into scroll panel; full-width square compact preview retained.")
+print(
+    "ARGOS 3.2.3 patch applied: telemetry moved into scroll panel; full-width square compact preview retained; "
+    "CapabilityInspector Context and localized HMC fallback compile defects repaired."
+)
