@@ -1,0 +1,210 @@
+name: Temporary ARGOS Mobile 3.2.3 baselined release
+
+on:
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.head_ref == 'argos-apk-build-20260731'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Recover exact preserved source and prepare baseline and release trees
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 --retry-all-errors \
+            "https://uc911555e5640b3b60e86a378345.dl.dropboxusercontent.com/cd/0/get/DFRN-tQoo6njC7x1mfeidwaXlyyvozQcA_JVItrM8N7u0BXtPU-CzDOrCka12WRwYfrk71eXTsVZSetKlTWnw8S3U3N6oqqveU_GgJx82C3Yqhvt1Jr-y4OEKluQtCBPzP3B9GUriDP5jYd5WltIEvczYmaj6y2kdzt2b7MGKaa2Mg/file?c_luid=12003740" \
+            -o /tmp/argos-source.zip
+          test "$(stat -c%s /tmp/argos-source.zip)" -eq 180620
+          test "$(sha256sum /tmp/argos-source.zip | cut -d' ' -f1)" = "05266c100430a43b1c97a40c7925d913f7ee122774605973b12f0a8cbb7b3f59"
+          unzip -t /tmp/argos-source.zip
+          mkdir baseline-src release-src
+          unzip -q /tmp/argos-source.zip -d baseline-src
+          unzip -q /tmp/argos-source.zip -d release-src
+          cp argos-build/patch_compile_only.py baseline-src/
+          cp argos-build/patch_argos.py release-src/
+          (cd baseline-src && python3 patch_compile_only.py)
+          (cd release-src && python3 patch_argos.py)
+          grep -q 'applicationId = "com.argos.mobile.multilingual"' release-src/app/build.gradle.kts
+          grep -q 'versionCode = 30203' release-src/app/build.gradle.kts
+          grep -q 'versionName = "3.2.3-telemetry-scroll"' release-src/app/build.gradle.kts
+          grep -q 'panel.addView(telemetryPanel)' release-src/app/src/main/java/com/argos/mobile/MainActivity.kt
+          grep -q 'overlayView.telemetryPanel = telemetryPanel' release-src/app/src/main/java/com/argos/mobile/MainActivity.kt
+          grep -q 'LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(widthDp))' release-src/app/src/main/java/com/argos/mobile/MainActivity.kt
+          ! grep -q 'previewColumn.addView(telemetryPanel)' release-src/app/src/main/java/com/argos/mobile/MainActivity.kt
+          grep -q 'class CapabilityInspector(private val context: Context)' release-src/app/src/main/java/com/argos/mobile/CapabilityInspector.kt
+          ! grep -q 'else -> return reason' release-src/app/src/main/java/com/argos/mobile/Localization.kt
+          ! grep -RIn 'android.permission.INTERNET' release-src/app/src/main/AndroidManifest.xml
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Establish preserved-source release-lint baseline
+        working-directory: baseline-src
+        run: |
+          set -uo pipefail
+          mkdir -p ../verification
+          gradle --no-daemon --stacktrace :app:lintRelease 2>&1 | tee ../verification/baseline-lint-console.log
+          status=${PIPESTATUS[0]}
+          echo "$status" > ../verification/baseline-lint-exit-code.txt
+          report="$(find app/build -type f -name 'lint-results-release.xml' | head -n 1)"
+          test -n "$report"
+          cp "$report" ../verification/baseline-lint.xml
+          text_report="$(find app/build -type f -name 'lint-results-release.txt' | head -n 1)"
+          if [ -n "$text_report" ]; then cp "$text_report" ../verification/baseline-lint.txt; fi
+          exit 0
+
+      - name: Analyze release lint and reject new issues
+        working-directory: release-src
+        run: |
+          set -uo pipefail
+          gradle --no-daemon --stacktrace :app:lintRelease 2>&1 | tee ../verification/release-lint-console.log
+          status=${PIPESTATUS[0]}
+          echo "$status" > ../verification/release-lint-exit-code.txt
+          report="$(find app/build -type f -name 'lint-results-release.xml' | head -n 1)"
+          test -n "$report"
+          cp "$report" ../verification/release-lint.xml
+          text_report="$(find app/build -type f -name 'lint-results-release.txt' | head -n 1)"
+          if [ -n "$text_report" ]; then cp "$text_report" ../verification/release-lint.txt; fi
+          python3 - <<'PY'
+          from collections import Counter
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          root = Path("../verification")
+
+          def normalize_file(value: str) -> str:
+              value = value.replace("\\", "/")
+              marker = "/app/"
+              if marker in value:
+                  return "app/" + value.split(marker, 1)[1]
+              return Path(value).name
+
+          def issue_counter(path: Path) -> Counter:
+              tree = ET.parse(path)
+              counter = Counter()
+              for issue in tree.getroot().findall("issue"):
+                  locations = tuple(sorted({
+                      normalize_file(location.attrib.get("file", ""))
+                      for location in issue.findall("location")
+                  }))
+                  key = (
+                      issue.attrib.get("id", ""),
+                      issue.attrib.get("severity", ""),
+                      issue.attrib.get("message", ""),
+                      locations,
+                  )
+                  counter[key] += 1
+              return counter
+
+          baseline = issue_counter(root / "baseline-lint.xml")
+          release = issue_counter(root / "release-lint.xml")
+          introduced = release - baseline
+          removed = baseline - release
+          lines = [
+              f"Baseline lint issue instances: {sum(baseline.values())}",
+              f"Release lint issue instances: {sum(release.values())}",
+              f"New lint issue instances introduced: {sum(introduced.values())}",
+              f"Pre-existing lint issue instances removed: {sum(removed.values())}",
+          ]
+          if introduced:
+              lines.append("\nIntroduced issues:")
+              for key, count in introduced.items():
+                  lines.append(f"{count} x {key}")
+          if removed:
+              lines.append("\nRemoved pre-existing issues:")
+              for key, count in removed.items():
+                  lines.append(f"{count} x {key}")
+          output = "\n".join(lines) + "\n"
+          (root / "lint-comparison.txt").write_text(output, encoding="utf-8")
+          print(output)
+          if introduced:
+              raise SystemExit("Release patch introduced new Android lint issues")
+          PY
+
+      - name: Unit tests and release assembly
+        working-directory: release-src
+        run: |
+          set -euo pipefail
+          mkdir -p deliverables
+          printf '%s  %s\n' "05266c100430a43b1c97a40c7925d913f7ee122774605973b12f0a8cbb7b3f59" "ARGOS-Mobile-3.2.0-Multilingual-Final-Source.zip" > deliverables/SOURCE-SHA256.txt
+          gradle --no-daemon --stacktrace :app:testDebugUnitTest 2>&1 | tee deliverables/unit-test.log
+          gradle --no-daemon --stacktrace :app:assembleRelease 2>&1 | tee deliverables/assemble-release.log
+          test -s app/build/outputs/apk/release/app-release-unsigned.apk
+          ! grep -Eiq 'BUILD FAILED|Compilation error' deliverables/unit-test.log deliverables/assemble-release.log
+          cp ../verification/lint-comparison.txt deliverables/
+          cp ../verification/baseline-lint.xml deliverables/
+          cp ../verification/release-lint.xml deliverables/
+          if [ -f ../verification/baseline-lint.txt ]; then cp ../verification/baseline-lint.txt deliverables/; fi
+          if [ -f ../verification/release-lint.txt ]; then cp ../verification/release-lint.txt deliverables/; fi
+
+      - name: Preserve complete feature boundary
+        working-directory: release-src
+        run: |
+          set -euo pipefail
+          for file in CameraController.kt CapabilityInspector.kt ImuRecorder.kt HmcEngine.kt SessionStore.kt QuicklookStacker.kt Localization.kt TelemetryPanelView.kt AdaptiveUi.kt OverlayView.kt DeviceMonitor.kt; do
+            test -f "app/src/main/java/com/argos/mobile/$file"
+          done
+          grep -q 'cameraController?.captureOne' app/src/main/java/com/argos/mobile/MainActivity.kt
+          grep -q 'exportCurrentSession()' app/src/main/java/com/argos/mobile/MainActivity.kt
+          grep -q 'buildQuicklookStack()' app/src/main/java/com/argos/mobile/MainActivity.kt
+          grep -q 'showHelpDialog()' app/src/main/java/com/argos/mobile/MainActivity.kt
+          grep -q 'runCapabilityAudit' app/src/main/java/com/argos/mobile/MainActivity.kt
+          grep -q 'overlayView.telemetryPanel = telemetryPanel' app/src/main/java/com/argos/mobile/MainActivity.kt
+          ! grep -RInE 'UnsupportedOperationException|NotImplementedError|placeholder logic|mock capture|simulation mode' app/src/main app/src/test
+          printf '%s\n' 'Camera2 capture, camera selection, exposure controls, HMC, capability audit, quicklook stacking, export, localization, help, telemetry wiring and session storage tokens are present.' > deliverables/feature-boundary.txt
+
+      - name: Align, sign, inspect and checksum installable APK
+        working-directory: release-src
+        run: |
+          set -euo pipefail
+          TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          FINAL="deliverables/ARGOS-Mobile-3.2.3-Telemetry-Scrollable-Final.apk"
+          "$TOOLS/zipalign" -p -f 4 app/build/outputs/apk/release/app-release-unsigned.apk /tmp/argos-aligned.apk
+          keytool -genkeypair -noprompt -storetype PKCS12 -keystore /tmp/argos-323.p12 \
+            -storepass argos3232026 -keypass argos3232026 -alias argosmobile \
+            -keyalg RSA -keysize 4096 -validity 3650 \
+            -dname "CN=ARGOS Mobile 3.2.3,OU=Engineering,O=ARGOS,L=Montreal,ST=Quebec,C=CA"
+          "$TOOLS/apksigner" sign --ks /tmp/argos-323.p12 --ks-key-alias argosmobile \
+            --ks-pass pass:argos3232026 --key-pass pass:argos3232026 \
+            --out "$FINAL" /tmp/argos-aligned.apk
+          "$TOOLS/zipalign" -c -v 4 "$FINAL" | tee deliverables/zipalign.log
+          "$TOOLS/apksigner" verify --verbose --print-certs "$FINAL" | tee deliverables/signature.log
+          "$TOOLS/aapt" dump badging "$FINAL" | tee deliverables/badging.log
+          "$TOOLS/aapt" dump permissions "$FINAL" | tee deliverables/permissions.log
+          grep -q "package: name='com.argos.mobile.multilingual' versionCode='30203' versionName='3.2.3-telemetry-scroll'" deliverables/badging.log
+          grep -q "launchable-activity: name='com.argos.mobile.MainActivity'" deliverables/badging.log
+          ! grep -q 'android.permission.INTERNET' deliverables/permissions.log
+          unzip -t "$FINAL" | tee deliverables/zip-integrity.log
+          sha256sum "$FINAL" | tee deliverables/APK-SHA256.txt
+          cp app/src/main/java/com/argos/mobile/MainActivity.kt deliverables/MainActivity-patched.kt
+          cp app/src/main/java/com/argos/mobile/CapabilityInspector.kt deliverables/CapabilityInspector-patched.kt
+          cp app/src/main/java/com/argos/mobile/Localization.kt deliverables/Localization-patched.kt
+          cp app/build.gradle.kts deliverables/app-build.gradle.kts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ARGOS-Mobile-3.2.3-verified-apk
+          path: release-src/deliverables/
+          if-no-files-found: error
+          retention-days: 30
