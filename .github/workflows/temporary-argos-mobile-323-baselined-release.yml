@@ -19,7 +19,7 @@ jobs:
         run: |
           set -euo pipefail
           curl --fail --location --retry 5 --retry-all-errors \
-            "https://uc911555e5640b3b60e86a378345.dl.dropboxusercontent.com/cd/0/get/DFRN-tQoo6njC7x1mfeidwaXlyyvozQcA_JVItrM8N7u0BXtPU-CzDOrCka12WRwYfrk71eXTsVZSetKlTWnw8S3U3N6oqqveU_GgJx82C3Yqhvt1Jr-y4OEKluQtCBPzP3B9GUriDP5jYd5WltIEvczYmaj6y2kdzt2b7MGKaa2Mg/file?c_luid=12003740" \
+            "https://uc17932438ac1ad9d3a58603faf9.dl.dropboxusercontent.com/cd/0/get/DFQtnTfcT_1QcavSjX4KPqp_g6wq5gfxrI4unC6otWSjzAyqgRVUE_OXBuMIP45ck00heTUfdDsf8uXgh40yGm7Xhmh9RzuV0c0BIxkwuEAvzG-xVLw-jdxIoOlTSo58q98Efl6do6YXSgC6YlwsYMNIDiCYtlTcCK5YZFhl-3J_FQ/file?c_luid=12003740" \
             -o /tmp/argos-source.zip
           test "$(stat -c%s /tmp/argos-source.zip)" -eq 180620
           test "$(sha256sum /tmp/argos-source.zip | cut -d' ' -f1)" = "05266c100430a43b1c97a40c7925d913f7ee122774605973b12f0a8cbb7b3f59"
@@ -64,22 +64,25 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p ../verification
+          set +e
           gradle --no-daemon --stacktrace :app:lintRelease 2>&1 | tee ../verification/baseline-lint-console.log
           status=${PIPESTATUS[0]}
+          set -e
           echo "$status" > ../verification/baseline-lint-exit-code.txt
           report="$(find app/build -type f -name 'lint-results-release.xml' | head -n 1)"
           test -n "$report"
           cp "$report" ../verification/baseline-lint.xml
           text_report="$(find app/build -type f -name 'lint-results-release.txt' | head -n 1)"
           if [ -n "$text_report" ]; then cp "$text_report" ../verification/baseline-lint.txt; fi
-          exit 0
 
       - name: Analyze release lint and reject new issues
         working-directory: release-src
         run: |
           set -uo pipefail
+          set +e
           gradle --no-daemon --stacktrace :app:lintRelease 2>&1 | tee ../verification/release-lint-console.log
           status=${PIPESTATUS[0]}
+          set -e
           echo "$status" > ../verification/release-lint-exit-code.txt
           report="$(find app/build -type f -name 'lint-results-release.xml' | head -n 1)"
           test -n "$report"
